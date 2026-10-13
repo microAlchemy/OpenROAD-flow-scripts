@@ -32,6 +32,9 @@ proc get_dfflegalize_args { file_path } {
 }
 
 source $::env(SCRIPTS_DIR)/synth_preamble.tcl
+source $::env(SCRIPTS_DIR)/synth_telemetry.tcl
+tel::init
+tel::mark load
 if { [env_var_exists_and_non_empty SYNTH_CHECKPOINT] } {
   read_checkpoint $::env(SYNTH_CHECKPOINT)
 } else {
@@ -64,8 +67,10 @@ if { [env_var_exists_and_non_empty SYNTH_BLACKBOXES] } {
   }
 }
 
+tel::mark hierarchy
 hierarchy -check -top $::env(DESIGN_NAME)
 
+tel::mark setup
 if { $::env(SYNTH_GUT) } {
   # /deletes all cells at the top level, which will quickly optimize away
   # everything else, including macros.
@@ -115,19 +120,20 @@ if {
   # Partition mode where the checkpoint is still canonical RTLIL (the keep
   # decision for this partition is driven externally). Run the full
   # coarse+fine synthesis, flattened.
-  synth -flatten -run :fine {*}$synth_full_args
+  tel::synth -flatten -run :fine {*}$synth_full_args
 } elseif { [env_var_exists_and_non_empty SYNTH_CHECKPOINT] } {
   # Partition mode where the checkpoint already holds coarse synth +
   # keep_hierarchy output. Just flatten and continue from coarse.
-  synth -flatten -run coarse:fine {*}$synth_full_args
+  tel::synth -flatten -run coarse:fine {*}$synth_full_args
 } elseif { !$::env(SYNTH_HIERARCHICAL) } {
   # Perform standard coarse-level synthesis script, flatten right away
-  synth -flatten -run :fine {*}$synth_full_args
+  tel::synth -flatten -run :fine {*}$synth_full_args
 } else {
   # Perform standard coarse-level synthesis script,
   # defer flattening until we have decided what hierarchy to keep
-  synth -run :fine
+  tel::synth -run :fine
 
+  tel::mark keep_hierarchy
   if { [env_var_exists_and_non_empty SYNTH_MINIMUM_KEEP_SIZE] } {
     set ungroup_threshold $::env(SYNTH_MINIMUM_KEEP_SIZE)
     puts "Keep modules above estimated size of
@@ -140,15 +146,17 @@ if {
   }
 
   # Re-run coarse-level script, this time do pass -flatten
-  synth -flatten -run coarse:fine {*}$synth_full_args
+  tel::synth -flatten -run coarse:fine {*}$synth_full_args
 }
 
 # Resolve internal tristates left by the slang frontend ---
+tel::mark tribuf
 if { [env_var_equals SYNTH_HDL_FRONTEND slang] } {
   tribuf -logic
   opt_clean
 }
 
+tel::mark mock_memories
 if { $::env(SYNTH_MOCK_LARGE_MEMORIES) } {
   memory_collect
   set select [tee -q -s result.string select -list t:\$mem_v2]
@@ -176,11 +184,14 @@ if { $::env(SYNTH_MOCK_LARGE_MEMORIES) } {
   close $report_file
 }
 
+tel::mark mem_json
 json -o $::env(RESULTS_DIR)/mem.json
 # Run report and check here so as to fail early if this synthesis run is doomed
+tel::mark mem_dump_py
 exec -- $::env(PYTHON_EXE) $::env(SCRIPTS_DIR)/mem_dump.py \
   --max-bits $::env(SYNTH_MEMORY_MAX_BITS) $::env(RESULTS_DIR)/mem.json
 
+tel::mark retime
 if { [env_var_exists_and_non_empty SYNTH_RETIME_MODULES] } {
   select {*}$::env(SYNTH_RETIME_MODULES)
   opt -fast -full
@@ -195,23 +206,28 @@ if {
   [env_var_equals SYNTH_WRAPPED_OPERATORS 1] ||
   [env_var_equals SWAP_ARITH_OPERATORS 1]
 } {
+  tel::mark wrap_operators
   log_cmd source $::env(SCRIPTS_DIR)/synth_wrap_operators.tcl
 } else {
-  synth -top $::env(DESIGN_NAME) -run fine: -noabc {*}$synth_full_args
+  tel::synth -top $::env(DESIGN_NAME) -run fine: -noabc {*}$synth_full_args
 }
 
 # Get rid of indigestibles
+tel::mark strip_formal
 chformal -remove
 delete t:\$print
 
 # rename registers to have the verilog register name in its name
 # of the form \regName$_DFF_P_. We should fix yosys to make it the reg name.
 # At least this is predictable.
+tel::mark renames
 renames -wire
 
 # Optimize the design
+tel::mark opt_purge
 opt -purge
 
+tel::mark adder_map
 # Technology mapping of adders
 if {
   [env_var_exists_and_non_empty ADDER_MAP_FILE] &&
@@ -232,6 +248,7 @@ if {
   opt -fast -purge
 }
 
+tel::mark latch_map
 # Technology mapping of latches
 if { [env_var_exists_and_non_empty LATCH_MAP_FILE] } {
   # Legalize async set/reset latches into the latches this map file provides
@@ -240,6 +257,7 @@ if { [env_var_exists_and_non_empty LATCH_MAP_FILE] } {
   techmap -map $::env(LATCH_MAP_FILE)
 }
 
+tel::mark clockgate
 # Clock gate inference.
 if { [env_var_equals INFER_CLKGATES 1] } {
   set clkgate_args {}
@@ -262,6 +280,7 @@ if { [env_var_equals INFER_CLKGATES 1] } {
   log_cmd clockgate {*}$clkgate_args
 }
 
+tel::mark dff_map
 # Technology mapping of flip-flops
 # dfflibmap only supports one liberty file
 if { [env_var_exists_and_non_empty DFF_LIB_FILE] } {
@@ -273,10 +292,13 @@ if { [env_var_exists_and_non_empty DFF_LIB_FILE] } {
 } else {
   dfflibmap {*}$lib_args {*}$lib_dont_use_args
 }
+tel::mark opt_post_dff
 opt
 
 # Replace undef values with defined constants
+tel::mark setundef
 setundef -zero
+tel::mark abc
 
 if {
   ![env_var_equals SYNTH_WRAPPED_OPERATORS 1] &&
@@ -293,12 +315,15 @@ if {
 
 # Splitting nets resolves unwanted compound assign statements in
 # netlist (assign {..} = {..})
+tel::mark splitnets
 splitnets
 
 # Remove unused cells and wires
+tel::mark opt_clean_purge
 opt_clean -purge
 
 # Technology mapping of constant hi- and/or lo-drivers
+tel::mark hilomap_insbuf
 hilomap -singleton \
   -hicell {*}$::env(TIEHI_CELL_AND_PORT) \
   -locell {*}$::env(TIELO_CELL_AND_PORT)
@@ -309,6 +334,7 @@ if { $::env(SYNTH_INSBUF) } {
 }
 
 # Reports
+tel::mark reports
 tee -o $::env(REPORTS_DIR)/synth_check.txt check
 
 tee -o $::env(REPORTS_DIR)/synth_stat.txt stat -hierarchy {*}$lib_args
@@ -336,4 +362,6 @@ if { $::env(SYNTH_REPEATABLE_BUILD) } {
 }
 
 # Write synthesized design
+tel::mark write_verilog
 write_verilog -nohex -nodec $::env(RESULTS_DIR)/1_2_yosys.v
+tel::finish
