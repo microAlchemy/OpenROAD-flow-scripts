@@ -1,33 +1,11 @@
 # synth_telemetry.tcl -- opt-in step telemetry for ORFS scripts/synth.tcl
-#
+
 # Sourced by synth.tcl right after synth_preamble.tcl (needs util.tcl's
 # env_var_* helpers). With SYNTH_TELEMETRY unset, every tel:: proc is a
-# no-op and tel::synth is a straight pass-through to `synth`, so the flow
-# is stock.
-#
-#   SYNTH_TELEMETRY=1       turn it on
-#   SYNTH_TELEMETRY_STAT=1  also write `stat -json` after every step. Taken
-#                           outside the timed window, but it still costs
-#                           wall time, so leave it off for timing runs.
-#
-# Writes to $REPORTS_DIR/telemetry/synth/ (wiped and rewritten on every
-# telemetry run; clean_synth leaves it alone):
-#   meta.tsv             run context + total_ms
-#   steps.tsv            order label start_ms dur_ms rss_before_kb rss_after_kb hwm_after_kb
-#   current_step         label of the step in flight; deleted on clean exit,
-#                        so if it's still there, that's where the run died.
-#                        `cat` it mid-run to see where a long synth is stuck.
-#   yosys.pid            for attaching dtrace or an external RSS sampler
-#   stat/NNN_label.json  only with SYNTH_TELEMETRY_STAT=1
-#
-# RSS covers the yosys process only. yosys-abc and mem_dump.py run as
-# child processes: their wall time lands in dur_ms, their memory doesn't.
-# hwm_after_kb (lifetime peak RSS) comes from /proc, so it's Linux-only;
-# it reads -1 on macOS.
-#
-# Steps are sequential: tel::mark closes whatever step is open and opens a
-# new one. tel::synth closes the open step and times each synth label range
-# (begin / coarse / fine / check) as its own step. Don't nest.
+# no-op and tel::synth is a straight pass-through to sytnh.
+
+#   SYNTH_TELEMETRY=1       
+#   SYNTH_TELEMETRY_STAT=1  for statjson/
 
 namespace eval tel {
   variable on 0
