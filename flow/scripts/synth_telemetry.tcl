@@ -1,11 +1,12 @@
 # synth_telemetry.tcl -- opt-in step telemetry for ORFS scripts/synth.tcl
-
+#
 # Sourced by synth.tcl right after synth_preamble.tcl (needs util.tcl's
 # env_var_* helpers). With SYNTH_TELEMETRY unset, every tel:: proc is a
 # no-op and tel::synth is a straight pass-through to sytnh.
-
+#
 #   SYNTH_TELEMETRY=1       
 #   SYNTH_TELEMETRY_STAT=1  for statjson/
+
 
 namespace eval tel {
   variable on 0
@@ -25,7 +26,7 @@ proc tel::now_us {} {
   return [clock microseconds]
 }
 
-# Returns {rss_kb hwm_kb}. No fork on Linux; one `ps` fork on macOS.
+# proc linux, `ps` fork on macOS.
 proc tel::mem {} {
   if { [file readable /proc/self/status] } {
     set rss -1
@@ -56,9 +57,6 @@ proc tel::init { } {
   }
   set on 1
   set stat [env_var_equals SYNTH_TELEMETRY_STAT 1]
-  # Deliberately NOT named synth_*: ORFS clean_synth runs
-  # `rm -f $(REPORTS_DIR)/synth_*`, and rm -f on a directory fails,
-  # which aborts clean_synth.
   set dir [file join $::env(REPORTS_DIR) telemetry synth]
   file delete -force $dir
   file mkdir $dir
@@ -66,9 +64,7 @@ proc tel::init { } {
     file mkdir [file join $dir stat]
   }
 
-  # Only split `synth` on labels this Yosys build actually has. A label
-  # that doesn't exist would make `synth -run X:Y` silently run nothing,
-  # which would change QoR. If anything looks off, time synth unsplit.
+  # Only split synth on labels this Yosys build actually has. to debug time synth unsplit.
   if { ![catch { ::tee -q -s result.string help synth } h] } {
     set split_ok 1
     foreach l $synth_labels {
@@ -78,9 +74,6 @@ proc tel::init { } {
     }
   }
 
-  # Ask the binary, not a `version` command: this Yosys build doesn't have
-  # one, and a command that throws inside `tee` leaves Yosys's per-pass
-  # timers in a broken state (that's where the 121865% came from).
   set ver unknown
   if { [env_var_exists_and_non_empty YOSYS_EXE] } {
     catch { set ver [string trim [exec $::env(YOSYS_EXE) -V]] }
@@ -133,8 +126,7 @@ proc tel::open_step { label } {
   puts $f $label
   close $f
   ::yosys log "@@TEL_BEGIN@@ $label"
-  # Sample memory before starting the clock so the sampling cost stays
-  # out of the step.
+  # Sample memory before starting the clock so the sampling cost out.
   set open_rss [lindex [mem] 0]
   set open_start [now_us]
 }
@@ -183,8 +175,7 @@ proc tel::mark { label } {
   open_step $label
 }
 
-# Drop-in for `synth`. Off: identical call. On: same args, run one label
-# range at a time, each timed as synth.<label>.
+# Off: identical call. On: same args, run one label range at a time.
 proc tel::synth { args } {
   variable on
   variable split_ok
