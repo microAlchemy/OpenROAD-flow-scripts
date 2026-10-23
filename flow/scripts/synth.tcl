@@ -32,6 +32,9 @@ proc get_dfflegalize_args { file_path } {
 }
 
 source $::env(SCRIPTS_DIR)/synth_preamble.tcl
+source $::env(SCRIPTS_DIR)/synth_telemetry.tcl
+source $::env(SCRIPTS_DIR)/synth_expanded.tcl
+tel::init
 if { [env_var_exists_and_non_empty SYNTH_CHECKPOINT] } {
   read_checkpoint $::env(SYNTH_CHECKPOINT)
 } else {
@@ -64,12 +67,12 @@ if { [env_var_exists_and_non_empty SYNTH_BLACKBOXES] } {
   }
 }
 
-hierarchy -check -top $::env(DESIGN_NAME)
+tel::run hierarchy {hierarchy -check -top $::env(DESIGN_NAME)}
 
 if { $::env(SYNTH_GUT) } {
   # /deletes all cells at the top level, which will quickly optimize away
   # everything else, including macros.
-  delete $::env(DESIGN_NAME)/c:*
+  tel::run delete {delete $::env(DESIGN_NAME)/c:*}
 }
 
 if { [env_var_exists_and_non_empty SYNTH_KEEP_MODULES] } {
@@ -115,42 +118,42 @@ if {
   # Partition mode where the checkpoint is still canonical RTLIL (the keep
   # decision for this partition is driven externally). Run the full
   # coarse+fine synthesis, flattened.
-  synth -flatten -run :fine {*}$synth_full_args
+  tel::synth -flatten -run :fine {*}$synth_full_args
 } elseif { [env_var_exists_and_non_empty SYNTH_CHECKPOINT] } {
   # Partition mode where the checkpoint already holds coarse synth +
   # keep_hierarchy output. Just flatten and continue from coarse.
-  synth -flatten -run coarse:fine {*}$synth_full_args
+  tel::synth -flatten -run coarse:fine {*}$synth_full_args
 } elseif { !$::env(SYNTH_HIERARCHICAL) } {
   # Perform standard coarse-level synthesis script, flatten right away
-  synth -flatten -run :fine {*}$synth_full_args
+  tel::synth -flatten -run :fine {*}$synth_full_args
 } else {
   # Perform standard coarse-level synthesis script,
   # defer flattening until we have decided what hierarchy to keep
-  synth -run :fine
+  tel::synth -run :fine
 
   if { [env_var_exists_and_non_empty SYNTH_MINIMUM_KEEP_SIZE] } {
     set ungroup_threshold $::env(SYNTH_MINIMUM_KEEP_SIZE)
     puts "Keep modules above estimated size of
       $ungroup_threshold gate equivalents"
 
-    convert_liberty_areas
-    keep_hierarchy -min_cost $ungroup_threshold
+    tel::run convert_liberty_areas {convert_liberty_areas}
+    tel::run keep_hierarchy {keep_hierarchy -min_cost $ungroup_threshold}
   } else {
-    keep_hierarchy
+    tel::run keep_hierarchy {keep_hierarchy}
   }
 
   # Re-run coarse-level script, this time do pass -flatten
-  synth -flatten -run coarse:fine {*}$synth_full_args
+  tel::synth -flatten -run coarse:fine {*}$synth_full_args
 }
 
 # Resolve internal tristates left by the slang frontend ---
 if { [env_var_equals SYNTH_HDL_FRONTEND slang] } {
-  tribuf -logic
-  opt_clean
+  tel::run tribuf {tribuf -logic}
+  tel::run opt_clean {opt_clean}
 }
 
 if { $::env(SYNTH_MOCK_LARGE_MEMORIES) } {
-  memory_collect
+  tel::run memory_collect {memory_collect}
   set select [tee -q -s result.string select -list t:\$mem_v2]
   set report_file [open $::env(REPORTS_DIR)/synth_mocked_memories.txt "w"]
   foreach path [split [string trim $select] "\n"] {
@@ -176,18 +179,18 @@ if { $::env(SYNTH_MOCK_LARGE_MEMORIES) } {
   close $report_file
 }
 
-json -o $::env(RESULTS_DIR)/mem.json
+tel::run json {json -o $::env(RESULTS_DIR)/mem.json}
 # Run report and check here so as to fail early if this synthesis run is doomed
 exec -- $::env(PYTHON_EXE) $::env(SCRIPTS_DIR)/mem_dump.py \
   --max-bits $::env(SYNTH_MEMORY_MAX_BITS) $::env(RESULTS_DIR)/mem.json
 
 if { [env_var_exists_and_non_empty SYNTH_RETIME_MODULES] } {
   select {*}$::env(SYNTH_RETIME_MODULES)
-  opt -fast -full
-  memory_map
-  opt -full
-  techmap
-  abc -dff -script $::env(SCRIPTS_DIR)/abc_retime.script
+  tel::run opt {opt -fast -full}
+  tel::run memory_map {memory_map}
+  tel::run opt {opt -full}
+  tel::run techmap {techmap}
+  tel::run abc {abc -dff -script $::env(SCRIPTS_DIR)/abc_retime.script}
   select -clear
 }
 
@@ -197,20 +200,20 @@ if {
 } {
   log_cmd source $::env(SCRIPTS_DIR)/synth_wrap_operators.tcl
 } else {
-  synth -top $::env(DESIGN_NAME) -run fine: -noabc {*}$synth_full_args
+  tel::synth -top $::env(DESIGN_NAME) -run fine: -noabc {*}$synth_full_args
 }
 
 # Get rid of indigestibles
-chformal -remove
-delete t:\$print
+tel::run chformal {chformal -remove}
+tel::run delete {delete t:\$print}
 
 # rename registers to have the verilog register name in its name
 # of the form \regName$_DFF_P_. We should fix yosys to make it the reg name.
 # At least this is predictable.
-renames -wire
+tel::run renames {renames -wire}
 
 # Optimize the design
-opt -purge
+tel::run opt {opt -purge}
 
 # Technology mapping of adders
 if {
@@ -224,20 +227,20 @@ if {
   )
 } {
   # extract the full adders
-  extract_fa
+  tel::run extract_fa {extract_fa}
   # map full adders
-  techmap -map $::env(ADDER_MAP_FILE)
-  techmap
+  tel::run techmap {techmap -map $::env(ADDER_MAP_FILE)}
+  tel::run techmap {techmap}
   # Quick optimization
-  opt -fast -purge
+  tel::run opt {opt -fast -purge}
 }
 
 # Technology mapping of latches
 if { [env_var_exists_and_non_empty LATCH_MAP_FILE] } {
   # Legalize async set/reset latches into the latches this map file provides
   # (soft-logic emulation); the trailing selection keeps dfflegalize off FFs.
-  dfflegalize {*}[get_dfflegalize_args $::env(LATCH_MAP_FILE)] {t:$_DLATCH_*}
-  techmap -map $::env(LATCH_MAP_FILE)
+  tel::run dfflegalize {dfflegalize {*}[get_dfflegalize_args $::env(LATCH_MAP_FILE)] {t:$_DLATCH_*}}
+  tel::run techmap {techmap -map $::env(LATCH_MAP_FILE)}
 }
 
 # Clock gate inference.
@@ -265,24 +268,24 @@ if { [env_var_equals INFER_CLKGATES 1] } {
 # Technology mapping of flip-flops
 # dfflibmap only supports one liberty file
 if { [env_var_exists_and_non_empty DFF_LIB_FILE] } {
-  dfflibmap -liberty $::env(DFF_LIB_FILE) {*}$lib_dont_use_args
+  tel::run dfflibmap {dfflibmap -liberty $::env(DFF_LIB_FILE) {*}$lib_dont_use_args}
 } elseif { [env_var_exists_and_non_empty DFF_MAP_FILE] } {
   set legalize_args [get_dfflegalize_args $::env(DFF_MAP_FILE)]
-  dfflegalize {*}$legalize_args
-  techmap -map $::env(DFF_MAP_FILE)
+  tel::run dfflegalize {dfflegalize {*}$legalize_args}
+  tel::run techmap {techmap -map $::env(DFF_MAP_FILE)}
 } else {
-  dfflibmap {*}$lib_args {*}$lib_dont_use_args
+  tel::run dfflibmap {dfflibmap {*}$lib_args {*}$lib_dont_use_args}
 }
-opt
+tel::run opt {opt}
 
 # Replace undef values with defined constants
-setundef -zero
+tel::run setundef {setundef -zero}
 
 if {
   ![env_var_equals SYNTH_WRAPPED_OPERATORS 1] &&
   ![env_var_equals SWAP_ARITH_OPERATORS 1]
 } {
-  log_cmd abc {*}$abc_args
+  tel::run abc {log_cmd abc {*}$abc_args}
 } else {
   # Not dead code: abc_new mistakes the "-script" in /OpenROAD-flow-scripts/...
   # paths for a given -script and drops its default (YosysHQ/yosys#6320).
@@ -292,31 +295,33 @@ if {
   # with the script above. An explicit -script overrides both, so it is
   # cropped from the arguments and ABC_SCRIPT does not apply here.
   set abc_args [lrange $abc_args 2 end]
-  log_cmd abc_new {*}$abc_args
-  delete {t:$specify*}
+  tel::run abc_new {log_cmd abc_new {*}$abc_args}
+  tel::run delete {delete {t:$specify*}}
 }
 
 # Splitting nets resolves unwanted compound assign statements in
 # netlist (assign {..} = {..})
-splitnets
+tel::run splitnets {splitnets}
 
 # Remove unused cells and wires
-opt_clean -purge
+tel::run opt_clean {opt_clean -purge}
 
 # Technology mapping of constant hi- and/or lo-drivers
-hilomap -singleton \
-  -hicell {*}$::env(TIEHI_CELL_AND_PORT) \
-  -locell {*}$::env(TIELO_CELL_AND_PORT)
+tel::run hilomap {
+  hilomap -singleton \
+    -hicell {*}$::env(TIEHI_CELL_AND_PORT) \
+    -locell {*}$::env(TIELO_CELL_AND_PORT)
+}
 
 if { $::env(SYNTH_INSBUF) } {
   # Insert buffer cells for pass through wires
-  insbuf -buf {*}$::env(MIN_BUF_CELL_AND_PORTS)
+  tel::run insbuf {insbuf -buf {*}$::env(MIN_BUF_CELL_AND_PORTS)}
 }
 
 # Reports
-tee -o $::env(REPORTS_DIR)/synth_check.txt check
+tel::run report {tee -o $::env(REPORTS_DIR)/synth_check.txt check}
 
-tee -o $::env(REPORTS_DIR)/synth_stat.txt stat -hierarchy {*}$lib_args
+tel::run report {tee -o $::env(REPORTS_DIR)/synth_stat.txt stat -hierarchy {*}$lib_args}
 
 # check the design is composed exclusively of target cells, and
 # check for other problems
@@ -324,12 +329,12 @@ if {
   ![env_var_equals SYNTH_WRAPPED_OPERATORS 1] &&
   ![env_var_equals SWAP_ARITH_OPERATORS 1]
 } {
-  check -assert -mapped
+  tel::run check {check -assert -mapped}
 } else {
   # Wrapped operator synthesis leaves around $buf cells which `check -mapped`
   # gets confused by, once Yosys#4931 is merged we can remove this branch and
   # always run `check -assert -mapped`
-  check -assert
+  tel::run check {check -assert}
 }
 
 if { $::env(SYNTH_REPEATABLE_BUILD) } {
@@ -341,4 +346,5 @@ if { $::env(SYNTH_REPEATABLE_BUILD) } {
 }
 
 # Write synthesized design
-write_verilog -nohex -nodec $::env(RESULTS_DIR)/1_2_yosys.v
+tel::run write_verilog {write_verilog -nohex -nodec $::env(RESULTS_DIR)/1_2_yosys.v}
+tel::finish
